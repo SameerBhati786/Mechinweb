@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { ServiceManager, ServiceData } from '../../lib/services';
-import { getPreferredCurrency, formatCurrency, detectUserLocation } from '../../utils/currency';
+import { getPreferredCurrency, formatCurrency, detectUserLocation, convertCurrency } from '../../utils/currency';
 import ErrorBoundary from '../../components/ErrorBoundary';
 export default function ServicesPage() {
   const [services, setServices] = useState<ServiceData[]>([]);
