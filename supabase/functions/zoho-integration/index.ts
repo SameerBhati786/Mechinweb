@@ -15,12 +15,13 @@ interface CustomerData {
 }
 
 interface ServiceItem {
-  serviceId: string;
+  serviceId?: string; // Optional - may not always be provided
   serviceName: string;
   packageType: string;
   quantity: number;
   unitPrice: number;
   totalPrice: number;
+  addOns?: any[]; // Optional add-ons
 }
 
 interface InvoiceRequest {
@@ -108,18 +109,54 @@ Deno.serve(async (req: Request) => {
     }
 
     if (req.method === 'POST') {
-      const requestData: InvoiceRequest = await req.json();
-      log('info', 'Processing invoice creation request', { 
-        requestId, 
+      let requestData: InvoiceRequest;
+
+      try {
+        requestData = await req.json();
+      } catch (parseError) {
+        log('error', 'Failed to parse request body', { requestId, error: parseError.message });
+        throw new Error('Invalid JSON in request body');
+      }
+
+      log('info', 'Processing invoice creation request', {
+        requestId,
         customerEmail: requestData.customerData?.email,
+        customerName: requestData.customerData?.name,
         serviceItemsCount: requestData.serviceItems?.length,
-        currency: requestData.currency
+        currency: requestData.currency,
+        hasCustomerData: !!requestData.customerData,
+        hasServiceItems: !!requestData.serviceItems
       });
 
-      // Validate request data
-      if (!requestData.customerData || !requestData.serviceItems || !requestData.currency) {
-        throw new Error('Missing required data: customerData, serviceItems, and currency are required');
+      // Validate request data with detailed error messages
+      if (!requestData.customerData) {
+        throw new Error('Missing customerData in request');
       }
+      if (!requestData.customerData.email) {
+        throw new Error('Missing customer email in customerData');
+      }
+      if (!requestData.customerData.name) {
+        throw new Error('Missing customer name in customerData');
+      }
+      if (!requestData.serviceItems || requestData.serviceItems.length === 0) {
+        throw new Error('Missing serviceItems or empty serviceItems array');
+      }
+      if (!requestData.currency) {
+        throw new Error('Missing currency in request');
+      }
+
+      // Log service items details for debugging
+      log('info', 'Service items details', {
+        requestId,
+        items: requestData.serviceItems.map(item => ({
+          serviceName: item.serviceName,
+          packageType: item.packageType,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          totalPrice: item.totalPrice,
+          hasServiceId: !!item.serviceId
+        }))
+      });
 
       // Create customer
       const customer = await createZohoCustomer(accessToken, zohoConfig, requestData.customerData, requestId);
