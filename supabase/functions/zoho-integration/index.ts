@@ -160,7 +160,16 @@ Deno.serve(async (req: Request) => {
 
       // Create customer
       const customer = await createZohoCustomer(accessToken, zohoConfig, requestData.customerData, requestId);
-      log('info', 'Customer processed', { requestId, customerId: customer.contact_id });
+      log('info', 'Customer processed', {
+        requestId,
+        customerId: customer.contact_id,
+        customerObject: customer
+      });
+
+      // Validate customer ID before creating invoice
+      if (!customer || !customer.contact_id) {
+        throw new Error('Invalid customer data received from Zoho');
+      }
 
       // Create invoice
       const invoice = await createZohoInvoice(accessToken, zohoConfig, customer.contact_id, requestData, requestId);
@@ -330,17 +339,25 @@ async function createZohoCustomer(
     });
 
     if (!response.ok) {
-      // If customer already exists, try to find them
-      if (response.status === 400) {
-        log('info', 'Customer might already exist, searching', { requestId, email: customerData.email });
-        return await findZohoCustomer(accessToken, config, customerData.email, requestId);
-      }
-      
       const errorText = await response.text();
-      log('error', 'Customer creation failed', { 
-        requestId, 
-        status: response.status, 
-        error: errorText 
+
+      // If customer already exists, try to find them
+      if (response.status === 400 || response.status === 422 || errorText.includes('already exists') || errorText.includes('duplicate')) {
+        log('info', 'Customer might already exist, searching', { requestId, email: customerData.email, status: response.status, error: errorText });
+        try {
+          const existingCustomer = await findZohoCustomer(accessToken, config, customerData.email, requestId);
+          if (existingCustomer) {
+            return existingCustomer;
+          }
+        } catch (findError) {
+          log('error', 'Could not find existing customer', { requestId, email: customerData.email, error: findError.message });
+        }
+      }
+
+      log('error', 'Customer creation failed', {
+        requestId,
+        status: response.status,
+        error: errorText
       });
       throw new Error(`Customer creation failed: ${response.status} ${errorText}`);
     }
@@ -385,17 +402,25 @@ async function findZohoCustomer(
     }
 
     const data = await response.json();
-    
+
+    log('info', 'Customer search response', {
+      requestId,
+      hasContacts: !!data.contacts,
+      contactsLength: data.contacts?.length || 0,
+      responseKeys: Object.keys(data)
+    });
+
     if (!data.contacts || data.contacts.length === 0) {
-      log('error', 'Customer not found', { requestId, email });
-      throw new Error('Customer not found');
+      log('error', 'Customer not found in search results', { requestId, email, response: data });
+      throw new Error(`Customer not found: ${email}`);
     }
 
     const customer = data.contacts[0];
-    log('info', 'Existing customer found', { 
-      requestId, 
+    log('info', 'Existing customer found', {
+      requestId,
       customerId: customer.contact_id,
-      customerName: customer.contact_name 
+      customerName: customer.contact_name,
+      email: customer.email
     });
 
     return customer;
@@ -406,19 +431,25 @@ async function findZohoCustomer(
 }
 
 async function createZohoInvoice(
-  accessToken: string, 
-  config: ZohoConfig, 
-  customerId: string, 
-  invoiceData: InvoiceRequest, 
+  accessToken: string,
+  config: ZohoConfig,
+  customerId: string,
+  invoiceData: InvoiceRequest,
   requestId: string
 ): Promise<any> {
   try {
-    log('info', 'Creating Zoho invoice', { 
-      requestId, 
-      customerId, 
+    log('info', 'Creating Zoho invoice', {
+      requestId,
+      customerId,
+      customerIdType: typeof customerId,
       currency: invoiceData.currency,
-      itemsCount: invoiceData.serviceItems.length 
+      itemsCount: invoiceData.serviceItems.length
     });
+
+    // Validate customerId
+    if (!customerId || customerId === 'undefined' || customerId === 'null') {
+      throw new Error(`Invalid customer ID: ${customerId}`);
+    }
 
     const lineItems = invoiceData.serviceItems.map(item => ({
       name: item.serviceName,
