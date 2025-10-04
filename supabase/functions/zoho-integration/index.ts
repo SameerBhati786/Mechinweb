@@ -309,18 +309,36 @@ async function testZohoConnection(accessToken: string, config: ZohoConfig, reque
 }
 
 async function createZohoCustomer(
-  accessToken: string, 
-  config: ZohoConfig, 
-  customerData: CustomerData, 
+  accessToken: string,
+  config: ZohoConfig,
+  customerData: CustomerData,
   requestId: string
 ): Promise<any> {
   try {
-    log('info', 'Creating Zoho customer', { 
-      requestId, 
+    log('info', 'Creating Zoho customer', {
+      requestId,
       email: customerData.email,
-      name: customerData.name 
+      name: customerData.name
     });
 
+    // FIRST: Try to find existing customer by email
+    // This prevents duplicate customer creation attempts
+    try {
+      log('info', 'Checking for existing customer by email', { requestId, email: customerData.email });
+      const existingCustomer = await findZohoCustomerByEmail(accessToken, config, customerData.email, requestId);
+      if (existingCustomer) {
+        log('info', 'Found existing customer, returning it', {
+          requestId,
+          customerId: existingCustomer.contact_id,
+          customerName: existingCustomer.contact_name
+        });
+        return existingCustomer;
+      }
+    } catch (findError) {
+      log('info', 'No existing customer found, proceeding with creation', { requestId });
+    }
+
+    // SECOND: Create new customer
     const customerPayload = {
       contact_name: customerData.name,
       company_name: customerData.company || '',
@@ -340,53 +358,97 @@ async function createZohoCustomer(
 
     if (!response.ok) {
       const errorText = await response.text();
+      let errorData;
 
-      // If customer already exists, try to find them
-      if (response.status === 400 || response.status === 422 || errorText.includes('already exists') || errorText.includes('duplicate')) {
-        log('info', 'Customer might already exist, searching', { requestId, email: customerData.email, status: response.status, error: errorText });
+      try {
+        errorData = JSON.parse(errorText);
+      } catch {
+        errorData = { message: errorText };
+      }
+
+      log('error', 'Customer creation API error', {
+        requestId,
+        status: response.status,
+        errorCode: errorData.code,
+        errorMessage: errorData.message,
+        customerName: customerData.name,
+        customerEmail: customerData.email
+      });
+
+      // Handle error 3062: Customer name already exists
+      if (errorData.code === 3062 || (errorData.message && errorData.message.includes('already exists'))) {
+        log('info', 'Customer with same name exists (error 3062), searching by email', {
+          requestId,
+          email: customerData.email,
+          name: customerData.name
+        });
+
+        // Try to find by email
         try {
-          const existingCustomer = await findZohoCustomer(accessToken, config, customerData.email, requestId);
+          const existingCustomer = await findZohoCustomerByEmail(accessToken, config, customerData.email, requestId);
           if (existingCustomer) {
+            log('info', 'Successfully found existing customer by email', {
+              requestId,
+              customerId: existingCustomer.contact_id
+            });
             return existingCustomer;
           }
-        } catch (findError) {
-          log('error', 'Could not find existing customer', { requestId, email: customerData.email, error: findError.message });
+        } catch (searchError) {
+          log('error', 'Could not find customer by email after duplicate name error', {
+            requestId,
+            email: customerData.email,
+            error: searchError.message
+          });
+        }
+
+        // If email search failed, try to find by name
+        try {
+          const customerByName = await findZohoCustomerByName(accessToken, config, customerData.name, requestId);
+          if (customerByName) {
+            log('info', 'Found existing customer by name', {
+              requestId,
+              customerId: customerByName.contact_id
+            });
+            return customerByName;
+          }
+        } catch (nameSearchError) {
+          log('error', 'Could not find customer by name', {
+            requestId,
+            name: customerData.name,
+            error: nameSearchError.message
+          });
         }
       }
 
-      log('error', 'Customer creation failed', {
-        requestId,
-        status: response.status,
-        error: errorText
-      });
-      throw new Error(`Customer creation failed: ${response.status} ${errorText}`);
+      throw new Error(`Customer creation failed: ${errorData.message || errorText}`);
     }
 
     const data = await response.json();
     const customer = data.contact;
-    
-    log('info', 'Customer created successfully', { 
-      requestId, 
+
+    log('info', 'Customer created successfully', {
+      requestId,
       customerId: customer.contact_id,
-      customerName: customer.contact_name 
+      customerName: customer.contact_name
     });
 
     return customer;
   } catch (error) {
-    log('error', 'Error in createZohoCustomer', { requestId, error: error.message });
+    log('error', 'Error in createZohoCustomer', { requestId, error: error.message, stack: error.stack });
     throw error;
   }
 }
 
-async function findZohoCustomer(
-  accessToken: string, 
-  config: ZohoConfig, 
-  email: string, 
+// Search customer by email
+async function findZohoCustomerByEmail(
+  accessToken: string,
+  config: ZohoConfig,
+  email: string,
   requestId: string
 ): Promise<any> {
   try {
-    log('info', 'Searching for existing customer', { requestId, email });
-    
+    log('info', 'Searching for customer by email', { requestId, email });
+
     const response = await fetch(`https://invoice.zoho.in/api/v3/contacts?email=${encodeURIComponent(email)}`, {
       headers: {
         'Authorization': `Zoho-oauthtoken ${accessToken}`,
@@ -397,26 +459,19 @@ async function findZohoCustomer(
 
     if (!response.ok) {
       const errorText = await response.text();
-      log('error', 'Customer search failed', { requestId, status: response.status, error: errorText });
-      throw new Error(`Customer search failed: ${response.status} ${errorText}`);
+      log('error', 'Customer search by email failed', { requestId, status: response.status, error: errorText });
+      throw new Error(`Customer search failed: ${response.status}`);
     }
 
     const data = await response.json();
 
-    log('info', 'Customer search response', {
-      requestId,
-      hasContacts: !!data.contacts,
-      contactsLength: data.contacts?.length || 0,
-      responseKeys: Object.keys(data)
-    });
-
     if (!data.contacts || data.contacts.length === 0) {
-      log('error', 'Customer not found in search results', { requestId, email, response: data });
+      log('info', 'No customer found with this email', { requestId, email });
       throw new Error(`Customer not found: ${email}`);
     }
 
     const customer = data.contacts[0];
-    log('info', 'Existing customer found', {
+    log('info', 'Customer found by email', {
       requestId,
       customerId: customer.contact_id,
       customerName: customer.contact_name,
@@ -425,7 +480,53 @@ async function findZohoCustomer(
 
     return customer;
   } catch (error) {
-    log('error', 'Error in findZohoCustomer', { requestId, error: error.message });
+    log('info', 'Customer lookup by email failed', { requestId, email, error: error.message });
+    throw error;
+  }
+}
+
+// Search customer by name
+async function findZohoCustomerByName(
+  accessToken: string,
+  config: ZohoConfig,
+  name: string,
+  requestId: string
+): Promise<any> {
+  try {
+    log('info', 'Searching for customer by name', { requestId, name });
+
+    const response = await fetch(`https://invoice.zoho.in/api/v3/contacts?contact_name=${encodeURIComponent(name)}`, {
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${accessToken}`,
+        'X-com-zoho-invoice-organizationid': config.organizationId,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      log('error', 'Customer search by name failed', { requestId, status: response.status, error: errorText });
+      throw new Error(`Customer search failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.contacts || data.contacts.length === 0) {
+      log('info', 'No customer found with this name', { requestId, name });
+      throw new Error(`Customer not found: ${name}`);
+    }
+
+    const customer = data.contacts[0];
+    log('info', 'Customer found by name', {
+      requestId,
+      customerId: customer.contact_id,
+      customerName: customer.contact_name,
+      email: customer.email
+    });
+
+    return customer;
+  } catch (error) {
+    log('info', 'Customer lookup by name failed', { requestId, name, error: error.message });
     throw error;
   }
 }
