@@ -560,9 +560,9 @@ async function createZohoInvoice(
       item_total: item.totalPrice
     }));
 
+    // Let Zoho auto-generate invoice numbers (don't include invoice_number field)
     const invoicePayload = {
       customer_id: customerId,
-      invoice_number: `MW-${Date.now()}`,
       date: new Date().toISOString().split('T')[0],
       due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       line_items: lineItems,
@@ -571,11 +571,12 @@ async function createZohoInvoice(
       currency_code: invoiceData.currency
     };
 
-    log('info', 'Invoice payload prepared', { 
-      requestId, 
-      invoiceNumber: invoicePayload.invoice_number,
+    log('info', 'Invoice payload prepared', {
+      requestId,
+      customerId: customerId,
       lineItemsCount: lineItems.length,
-      currency: invoicePayload.currency_code 
+      currency: invoicePayload.currency_code,
+      autoGenerateInvoiceNumber: true
     });
 
     const response = await fetch('https://invoice.zoho.in/api/v3/invoices', {
