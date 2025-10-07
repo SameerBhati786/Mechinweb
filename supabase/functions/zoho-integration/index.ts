@@ -608,30 +608,143 @@ async function createZohoInvoice(
       throw new Error('No invoice data in response');
     }
 
-    log('info', 'Invoice created successfully', { 
-      requestId, 
+    log('info', 'Invoice created successfully', {
+      requestId,
       invoiceId: invoice.invoice_id,
       invoiceNumber: invoice.invoice_number,
       total: invoice.total,
-      status: invoice.status 
+      status: invoice.status
     });
 
-    // Return invoice with payment URL
+    // Step 2: Send the invoice to customer (required to enable payment)
+    const sentInvoice = await sendZohoInvoice(accessToken, config, invoice.invoice_id, requestId);
+
+    // Step 3: Get customer payment portal URL
+    const paymentUrl = await getZohoPaymentUrl(accessToken, config, invoice.invoice_id, requestId);
+
+    log('info', 'Invoice sent and payment URL obtained', {
+      requestId,
+      invoiceId: invoice.invoice_id,
+      invoiceStatus: sentInvoice.status,
+      paymentUrl: paymentUrl
+    });
+
+    // Return invoice with customer payment URL
     return {
       invoice_id: invoice.invoice_id,
       invoice_number: invoice.invoice_number,
-      payment_url: `https://invoice.zoho.in/invoices/${invoice.invoice_id}/payment`,
+      payment_url: paymentUrl,
       total: invoice.total,
-      status: invoice.status,
+      status: sentInvoice.status,
       customer_id: customerId
     };
   } catch (error) {
-    log('error', 'Error in createZohoInvoice', { 
-      requestId, 
-      customerId, 
+    log('error', 'Error in createZohoInvoice', {
+      requestId,
+      customerId,
       error: error.message,
-      stack: error.stack 
+      stack: error.stack
     });
     throw error;
+  }
+}
+
+// Send invoice to customer (marks it as "Sent" and enables payment)
+async function sendZohoInvoice(
+  accessToken: string,
+  config: ZohoConfig,
+  invoiceId: string,
+  requestId: string
+): Promise<any> {
+  try {
+    log('info', 'Sending invoice to customer', { requestId, invoiceId });
+
+    const response = await fetch(`https://invoice.zoho.in/api/v3/invoices/${invoiceId}/status/sent`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${accessToken}`,
+        'X-com-zoho-invoice-organizationid': config.organizationId,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      log('error', 'Failed to send invoice', {
+        requestId,
+        invoiceId,
+        status: response.status,
+        error: errorText
+      });
+      throw new Error(`Failed to send invoice: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json();
+    log('info', 'Invoice sent successfully', {
+      requestId,
+      invoiceId,
+      status: data.invoice?.status
+    });
+
+    return data.invoice;
+  } catch (error) {
+    log('error', 'Error sending invoice', { requestId, invoiceId, error: error.message });
+    throw error;
+  }
+}
+
+// Get customer payment portal URL
+async function getZohoPaymentUrl(
+  accessToken: string,
+  config: ZohoConfig,
+  invoiceId: string,
+  requestId: string
+): Promise<string> {
+  try {
+    log('info', 'Fetching payment URL for invoice', { requestId, invoiceId });
+
+    // Get invoice details which includes the invoice_url (customer portal link)
+    const response = await fetch(`https://invoice.zoho.in/api/v3/invoices/${invoiceId}`, {
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${accessToken}`,
+        'X-com-zoho-invoice-organizationid': config.organizationId,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      log('error', 'Failed to get invoice details', {
+        requestId,
+        invoiceId,
+        status: response.status,
+        error: errorText
+      });
+      throw new Error(`Failed to get invoice details: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const invoice = data.invoice;
+
+    if (!invoice) {
+      throw new Error('No invoice data in response');
+    }
+
+    // Zoho provides invoice_url which is the customer-facing payment portal
+    // This URL allows customers to view the invoice and pay online
+    const paymentUrl = invoice.invoice_url || `https://invoice.zoho.in/portal/${config.organizationId}/invoices/${invoiceId}`;
+
+    log('info', 'Payment URL retrieved', {
+      requestId,
+      invoiceId,
+      paymentUrl: paymentUrl,
+      hasInvoiceUrl: !!invoice.invoice_url
+    });
+
+    return paymentUrl;
+  } catch (error) {
+    log('error', 'Error getting payment URL', { requestId, invoiceId, error: error.message });
+    // Fallback to generic portal URL
+    return `https://invoice.zoho.in/portal/${config.organizationId}/invoices/${invoiceId}`;
   }
 }
